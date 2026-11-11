@@ -142,6 +142,3 @@ failure. The check is, in order: the commands the plan names (passed as `VERIFY:
 commands in `<worktree>/.claude/verify-fast` or `<worktree>/.cursor/verify-fast` (one per line), or
 `tsc` plus `vitest related` when the project uses them. After two failed attempts the implementer
 stops and the reviewer sees the result.
-
-The Datanotes integration (`references/datanotes.md`) is optional and used only when a Datanotes
-MCP server is connected.

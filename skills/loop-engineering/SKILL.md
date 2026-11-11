@@ -78,9 +78,6 @@ the lock and stop: the roles run on these agents only.
   A `fallback:` line is a specialist the plan names and this harness lacks: the package runs on
   `loop-implementer`, the stage is skipped. Tell the user, in the contract and in the final report.
 
-With a Datanotes MCP server connected (tools `plan_execution`, `start_task`), also follow
-[references/datanotes.md](references/datanotes.md).
-
 ## One orchestrator at a time
 
 A Claude Code session and a Cursor session can hand a loop over to each other through the state
