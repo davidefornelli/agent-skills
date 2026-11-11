@@ -10,10 +10,9 @@
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-import { CONFIG_DIR, IMPLEMENTER, frontmatter, log, pass, reply, start } from "./common.mjs";
+import { CONFIG_DIR, IMPLEMENTER, ROLE, frontmatter, log, pass, reply, start } from "./common.mjs";
 
 const LOG = "subagents.jsonl";
-const ROLE = /^loop-(planner|reviewer|implementer(-senior)?)$/;
 
 const { input, harness } = start(LOG);
 

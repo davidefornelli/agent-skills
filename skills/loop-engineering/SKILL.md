@@ -23,11 +23,15 @@ A loop costs 3 to 5 times a direct implementation. Do the work directly, and say
 | --- | --- | --- |
 | Orchestrator | the main session | the loop state, merges |
 | Planner | `loop-planner` | the plan file |
-| Implementer | `loop-implementer`; `loop-implementer-senior` where the wave calculator says so | its worktree and branch |
-| Reviewer | `loop-reviewer` | the verdict file |
+| Implementer | the type the wave calculator prints per package: `loop-implementer`, `loop-implementer-senior` or a specialist `loop-implementer-<name>` | its worktree and branch |
+| Reviewer | `loop-reviewer`; a specialist `loop-reviewer-<name>` per extra stage the calculator prints | the verdict file |
 
 Each role's model is the `model:` line of its agent file: launch these types without a model
 argument. Each agent's own file holds its role's rules: your prompts carry the inputs listed below.
+
+**Specialists** are the user's own agents adopted into the loop (the `loop-engineering-setup`
+skill does it): the `loop-implementer-<name>` and `loop-reviewer-<name>` types your subagent tool
+offers. The plan assigns packages and extra review stages to them.
 
 ## Your harness
 
@@ -62,12 +66,17 @@ the lock and stop: the roles run on these agents only.
   - the round counter and, per wave, the rounds used and the limit;
   - per package: status (`todo`, `running`, `merged`, `passed`, `failed`), branch, worktree, base,
     agent id, last commit;
-  - per wave: the commit each review stage has judged up to;
+  - per wave: its extra review stages (agent, packages) and the commit each review stage has
+    judged up to;
   - the verdict files, your own findings, and **Deferred findings** (the minor ones).
 - **Verdicts**: `<plan>.loop/verdict-<round>-<stage>.md`.
-- **Waves**: `node <this skill's folder>/plan-waves.mjs <plan> --done <merged and passed ids>`.
-  Run it before every wave and execute its first wave, with the implementer it prints per package.
+- **Waves**: `node <this skill's folder>/plan-waves.mjs <plan> --done <merged and passed ids>
+  --agents <the specialist types your subagent tool offers, comma-separated, or none>`.
+  Run it before every wave and execute its first wave, with the implementer it prints per package;
+  a `review after quality:` line is an extra review stage of that wave (step 6).
   `deferred` lines are informative; `error`, `blocked` or `unknown_scope` go back to the planner.
+  A `fallback:` line is a specialist the plan names and this harness lacks: the package runs on
+  `loop-implementer`, the stage is skipped. Tell the user, in the contract and in the final report.
 
 With a Datanotes MCP server connected (tools `plan_execution`, `start_task`), also follow
 [references/datanotes.md](references/datanotes.md).
@@ -85,11 +94,13 @@ When you stop, set the lock to `released` and running packages to `todo`.
 ## The loop
 
 1. **Plan.** Without a plan file, launch `loop-planner` with the user's request, `PLAN: <absolute
-   path>` and `WAVES: node <this skill's folder>/plan-waves.mjs`. Done when the wave calculator
-   exits 0 on the plan with `--strict`.
-2. **Contract.** On the first run of a plan, show the user the waves (packages, implementers), the
-   Execution setup and the round limit (default 3 per wave), and wait for their ok. Then create the
-   integration branch and its worktree from the start commit, and the state file.
+   path>`, `WAVES: node <this skill's folder>/plan-waves.mjs` and `SPECIALISTS:` followed by one
+   line per specialist type, with its description (`SPECIALISTS: none` without any). Done when the
+   wave calculator exits 0 on the plan with `--strict`.
+2. **Contract.** On the first run of a plan, show the user the waves (packages, implementers,
+   extra review stages, `fallback:` lines), the Execution setup and the round limit (default 3 per
+   wave), and wait for their ok. Then create the integration branch and its worktree from the
+   start commit, and the state file.
 3. **Execute the wave.** Per package: `git worktree add -b <branch> <path> <integration head>`,
    then the install step. A `failed` package that runs again keeps its worktree and branch. Launch
    one implementer per package, all in one message, in the background. Each prompt gives: the plan
@@ -116,10 +127,15 @@ When you stop, set the lock to `released` and running packages to `todo`.
    RANGE is what that stage has not judged yet: the whole wave the first time, then the fix commits.
    - Spec FAIL: step 7 with that verdict.
    - Spec PASS: a new `loop-reviewer` with `STAGE: quality` and its own RANGE, VERDICT and
-     PREVIOUS. Its verdict decides step 7.
+     PREVIOUS. On FAIL: step 7 with that verdict.
+   - Quality PASS: the wave's extra stages, one after the other. A stage runs when it has not
+     passed yet, or when the calculator printed it for the fix wave just merged. Launch the
+     stage's agent (`loop-reviewer-<stage>`) with `STAGE: <stage>`, `PACKAGES: <the stage's
+     packages and their fixes>` and its own RANGE, VERDICT and PREVIOUS. Every stage runs; step 7
+     gets all their verdicts.
 7. **Decide.** Copy the verdicts' minor findings to Deferred findings, then:
-   - PASS and no `failed` package: the wave's packages are `passed`. Next wave (step 3), or step 8
-     when the calculator has none left.
+   - Every verdict PASS and no `failed` package: the wave's packages are `passed`. Next wave
+     (step 3), or step 8 when the calculator has none left.
    - Otherwise, with rounds left for this wave: launch `loop-planner` in revision mode (`PLAN`,
      `WAVES`, `ROUND`, `VERDICT: <each failing verdict>`, `MERGED: <merged and passed ids>`, your
      own findings). Rerun the calculator: fix packages come first, alone. Run them from step 3 with
@@ -143,9 +159,9 @@ When you stop, set the lock to `released` and running packages to `todo`.
 - One implementer per package; a merge conflict between two packages of a wave is a `plan` finding.
 - Keep your own context small: read reports and verdicts, leave the diffs to the reviewer.
 - The hooks back this up (logs in `<config>/hooks/logs/`):
-  - `agent-guard`, at the launch of a loop agent, refuses an implementer without `WORKTREE:` and
-    `BASE:`, and a model argument that contradicts the agent file. Fix the cause it names and
-    launch the same type again.
+  - `agent-guard`, at the launch of a loop agent, refuses an implementer (specialists included)
+    without `WORKTREE:` and `BASE:`, and a model argument that contradicts the agent file. Fix
+    the cause it names and launch the same type again.
   - `subagent-verify`, when an implementer stops, runs the fast check on the changes since BASE
     (the `VERIFY:` lines, else `<worktree>/.claude/verify-fast` or `.cursor/verify-fast`, else type
     check and `vitest related`) and sends the implementer back to fix a failure, at most twice.
@@ -156,6 +172,7 @@ When you stop, set the lock to `released` and running packages to `todo`.
 ## Final report to the user
 
 Per package: passed or not, the round it passed in, its commits. The open findings and the
-deferred ones left. Rounds used; time and tool calls per role (the audit log's lines whose
-`session` is yours). Worktrees and branches left behind. What waits for the user: the merge of the
+deferred ones left. Rounds used; time and tool calls per agent type (the audit log's lines whose
+`session` is yours): with specialists, that is their comparison with the bundled agents. The
+`fallback:` lines. Worktrees and branches left behind. What waits for the user: the merge of the
 integration branch, release, data migrations.

@@ -8,15 +8,18 @@
 //     { "id": "P1", "title": "Add the parser", "touches": ["src/parser.ts"], "blocked_by": [] },
 //     { "id": "P2", "title": "Use the parser", "touches": ["src/cli.ts"], "blocked_by": ["P1"],
 //       "implementer": "senior", "priority": "high" },
-//     { "id": "P3", "title": "Fix R1-2", "touches": ["src/parser.ts"], "fixes": "P1" }
+//     { "id": "P3", "title": "Login form", "touches": ["web/login/**"], "implementer": "frontend",
+//       "review": ["security"] },
+//     { "id": "P4", "title": "Fix R1-2", "touches": ["src/parser.ts"], "fixes": "P1" }
 //   ]
 //   ```
 //
 // Fields: id and title (required); blocked_by (ids that must be done first); touches (the files
-// the package owns: paths relative to the repository, a directory, or a glob); implementer
-// (`standard`, the default, or `senior`: which of the two implementer agents runs it; the model of
-// each agent is set where the agents are installed); priority (`urgent`, `high`, `medium`, `low`);
-// fixes (the id of the package this one repairs).
+// the package owns: paths relative to the repository, a directory, or a glob); implementer (the
+// agent that runs it: `standard`, the default, is `loop-implementer`; any other name is
+// `loop-implementer-<name>`: `senior`, or a specialist the user adopted into the loop); review
+// (extra review stages after spec and quality: each name is the agent `loop-reviewer-<name>`);
+// priority (`urgent`, `high`, `medium`, `low`); fixes (the id of the package this one repairs).
 //
 // Rules:
 // - a wave holds packages that can run in parallel; a package waits for its blocked_by;
@@ -25,25 +28,38 @@
 // - inside a wave: priority first (urgent, high, medium, low; none counts as medium), then id;
 // - whatever waits for a package also waits for the packages that fix it, and while fix packages
 //   are ready the wave holds only them;
-// - the second fix of the same package runs on the senior implementer (`escalated`).
+// - the second fix of the same package runs on the senior implementer (`escalated`);
+// - a fix package without its own `review` gets the review stages of the package it repairs;
+// - with --agents, a package whose specialist is not installed runs on `loop-implementer`, and a
+//   review stage whose specialist is not installed is skipped: both are reported under `fallback`.
 //
-// Usage: node plan-waves.mjs <plan.md> [--done P1,P2] [--json] [--strict]
+// Usage: node plan-waves.mjs <plan.md> [--done P1,P2] [--agents a,b] [--json] [--strict]
 //   --done    packages already merged into the integration branch: they are left out and count
 //             as satisfied dependencies. The first wave printed is the next one to run.
+//   --agents  the specialists this harness offers: its `loop-implementer-<name>` and
+//             `loop-reviewer-<name>` agent types (`none` when it has none). Without the option the
+//             plan's names are taken as they are.
 //   --json    machine-readable output
 //   --strict  a package without touches is an error (the planner validates with this)
 // Exit code: 0 the plan is runnable, 1 the plan has errors, 2 wrong usage or unreadable file.
 import { readFileSync } from "node:fs";
 
 const PRIORITIES = ["urgent", "high", "medium", "low"];
-const IMPLEMENTERS = ["standard", "senior"];
+// The name of an implementer or of a review stage: what follows `loop-implementer-` or
+// `loop-reviewer-` in the agent's name.
+const NAME = /^[a-z0-9][a-z0-9-]*$/;
+const STANDARD = "loop-implementer";
+const SENIOR = "loop-implementer-senior";
 // Plans written before the implementers were named after their role, not their model.
 const OLD_IMPLEMENTERS = { sonnet: "standard", opus: "senior" };
-const FIELDS = new Set(["id", "title", "blocked_by", "touches", "implementer", "priority", "fixes"]);
+// The stages every wave or loop goes through: `review` adds to them.
+const OWN_STAGES = ["spec", "quality", "final"];
+const FIELDS = new Set(["id", "title", "blocked_by", "touches", "implementer", "review", "priority", "fixes"]);
+const USAGE = "Usage: node plan-waves.mjs <plan.md> [--done P1,P2] [--agents a,b] [--json] [--strict]";
 
 function usage(message) {
   if (message) console.error(message);
-  console.error("Usage: node plan-waves.mjs <plan.md> [--done P1,P2] [--json] [--strict]");
+  console.error(USAGE);
   process.exit(2);
 }
 
@@ -53,10 +69,17 @@ let planPath;
 let asJson = false;
 let strict = false;
 const done = new Set();
+let agents = null; // the specialists the harness offers, when the caller says
+const readAgents = (value) => new Set(value.split(/[\s,]+/).filter((a) => a !== "" && a !== "none"));
 for (let i = 0; i < argv.length; i++) {
   const a = argv[i];
   if (a === "--json") asJson = true;
   else if (a === "--strict") strict = true;
+  else if (a === "--agents") {
+    const value = argv[++i];
+    if (value === undefined) usage("--agents needs the specialists the harness offers, e.g. --agents loop-implementer-frontend,loop-reviewer-security (or none)");
+    agents = readAgents(value);
+  } else if (a.startsWith("--agents=")) agents = readAgents(a.slice(9));
   else if (a === "--done") {
     const value = argv[++i];
     if (value === undefined) usage("--done needs a list of ids, e.g. --done P1,P2");
@@ -133,8 +156,21 @@ readPackages().forEach((raw, index) => {
     warnings.push(`${id}: "implementer": "${implementer}" is the old name of "${OLD_IMPLEMENTERS[implementer]}": write that`);
     implementer = OLD_IMPLEMENTERS[implementer];
   }
-  if (implementer !== undefined && !IMPLEMENTERS.includes(implementer)) {
-    errors.push(`${id}: "implementer" must be ${IMPLEMENTERS.join(" or ")}`);
+  const named = typeof implementer === "string" && NAME.test(implementer);
+  if (implementer !== undefined && !named) {
+    errors.push(`${id}: "implementer" must be standard, senior or the name of a specialist (lowercase letters, digits, hyphens)`);
+  }
+  // null: not declared. A fix package then takes the stages of the package it repairs.
+  let review = null;
+  if (raw.review !== undefined) {
+    review = strings(raw.review) ? [...new Set(raw.review.map((s) => s.trim()))] : [];
+    const own = review.filter((s) => OWN_STAGES.includes(s));
+    if (!strings(raw.review) || !review.every((s) => NAME.test(s))) {
+      errors.push(`${id}: "review" must be an array of specialist names (lowercase letters, digits, hyphens)`);
+      review = [];
+    } else if (own.length > 0) {
+      errors.push(`${id}: "review" names extra stages only: ${own.join(", ")} always run${own.length === 1 ? "s" : ""}`);
+    }
   }
   if (raw.priority !== undefined && !PRIORITIES.includes(raw.priority)) {
     errors.push(`${id}: "priority" must be one of ${PRIORITIES.join(", ")}`);
@@ -147,7 +183,8 @@ readPackages().forEach((raw, index) => {
     title: typeof raw.title === "string" ? raw.title.trim() : "",
     blocked_by: strings(raw.blocked_by) ? [...new Set(raw.blocked_by.map((s) => s.trim()))] : [],
     touches: strings(raw.touches) ? [...new Set(raw.touches.map(normalize))] : [],
-    implementer: IMPLEMENTERS.includes(implementer) ? implementer : "standard",
+    implementer: named ? implementer : "standard",
+    review,
     priority: PRIORITIES.includes(raw.priority) ? raw.priority : null,
     fixes: typeof raw.fixes === "string" && raw.fixes.trim() !== "" ? raw.fixes.trim() : null,
     index,
@@ -205,6 +242,27 @@ for (const p of packages) {
   const origin = p.repairs.at(-1);
   p.escalated = origin !== undefined && fixersOf.get(origin).some((f) => f.id !== p.id && done.has(f.id));
   if (p.escalated) p.implementer = "senior";
+  p.review ??= (origin === undefined ? null : byId.get(origin).review) ?? [];
+}
+
+// ---------------------------------------------------------------- agents
+// The agent each package runs on and the extra review stages it gets. With --agents, a
+// specialist the harness does not offer is replaced (implementer) or skipped (review stage).
+const fallbacks = [];
+const offered = (agent) => agents === null || agent === SENIOR || agents.has(agent);
+for (const p of packages) {
+  const wanted = p.implementer === "standard" ? STANDARD : `${STANDARD}-${p.implementer}`;
+  p.agent = wanted === STANDARD || offered(wanted) ? wanted : STANDARD;
+  p.stages = p.review.filter((stage) => offered(`loop-reviewer-${stage}`));
+  if (done.has(p.id)) continue;
+  if (p.agent !== wanted) fallbacks.push({ id: p.id, runs_on: STANDARD, instead_of: wanted });
+  for (const stage of p.review) if (!p.stages.includes(stage)) fallbacks.push({ id: p.id, skips_review: stage, missing: `loop-reviewer-${stage}` });
+}
+/** The extra review stages of a wave, each with the packages it judges. */
+function reviewStages(wave) {
+  const by = new Map();
+  for (const p of wave) for (const stage of p.stages) by.set(stage, [...(by.get(stage) ?? []), p.id]);
+  return [...by].map(([stage, ids]) => ({ stage, agent: `loop-reviewer-${stage}`, packages: ids }));
 }
 
 // ---------------------------------------------------------------- overlap of touches
@@ -349,7 +407,6 @@ if (strict && unknownScope.length > 0) {
 }
 
 // ---------------------------------------------------------------- output
-const agentOf = (p) => (p.implementer === "senior" ? "loop-implementer-senior" : "loop-implementer");
 const result = {
   plan: planPath,
   packages: packages.length,
@@ -359,13 +416,16 @@ const result = {
     packages: wave.map((p) => ({
       id: p.id,
       title: p.title,
-      agent: agentOf(p),
+      agent: p.agent,
       ...(p.escalated ? { escalated: true } : {}),
+      ...(p.stages.length > 0 ? { review: p.stages } : {}),
       ...(p.fixes ? { fixes: p.fixes } : {}),
       ...(p.priority ? { priority: p.priority } : {}),
       touches: p.touches,
     })),
+    review_stages: reviewStages(wave),
   })),
+  fallbacks,
   deferred,
   blocked,
   cycles,
@@ -382,9 +442,14 @@ if (asJson) {
   for (const [i, wave] of waves.entries()) {
     console.log(`wave ${i + 1}:`);
     for (const p of wave) {
-      const notes = [agentOf(p), p.escalated ? "escalated" : null, p.fixes ? `fixes ${p.fixes}` : null, p.priority].filter(Boolean);
+      const notes = [p.agent, p.escalated ? "escalated" : null, p.fixes ? `fixes ${p.fixes}` : null, p.priority].filter(Boolean);
       console.log(`  ${p.id}  ${p.title}  [${notes.join(", ")}]`);
     }
+    for (const s of reviewStages(wave)) console.log(`  review after quality: ${s.agent} on ${s.packages.join(", ")}`);
+  }
+  for (const f of fallbacks) {
+    if (f.runs_on) console.log(`fallback: ${f.id} runs on ${f.runs_on}: ${f.instead_of} is not among --agents`);
+    else console.log(`fallback: ${f.id} skips the review stage ${f.skips_review}: ${f.missing} is not among --agents`);
   }
   for (const d of deferred) console.log(`deferred: ${d.id} from wave ${d.from_wave} to wave ${d.to_wave}, overlaps ${d.with} on ${d.on.join(", ")}`);
   for (const b of blocked) console.log(`blocked: ${b.id}${b.in_cycle ? " (in a cycle)" : ""} waits for ${b.waits_for.join(", ")}`);

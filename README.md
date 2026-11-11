@@ -33,6 +33,7 @@ node install.mjs --check                # what is installed, exit 0 when ready
 | `loop-planner`, `loop-implementer`, `loop-implementer-senior`, `loop-reviewer` | `~/.claude/agents/` | `~/.cursor/agents/` |
 | hooks `agent-guard`, `subagent-verify`, `subagent-audit` | `~/.claude/hooks/loop-engineering/` | `~/.cursor/hooks/loop-engineering/` |
 | hook entries | `settings.json`: PreToolUse on Agent, SubagentStop | `hooks.json`: subagentStart, subagentStop |
+| your specialists (`--adopt`): `loop-implementer-<name>`, `loop-reviewer-<name>` | `~/.claude/agents/` | `~/.cursor/agents/` |
 
 ### Choosing the models
 
@@ -53,12 +54,34 @@ node install.mjs --target cursor --model planner=<id> --model implementer=<id>  
 
 `inherit` follows the model of the conversation that launches the agent.
 
-Other options: `--project <dir>` copies only the agents into a project (`<dir>/.cursor/agents` or
+### Your own agents as specialists
+
+An agent you already have (a frontend developer, a security auditor, a CI expert) can join the
+loop next to the bundled ones, as an implementer the plan gives packages to or as an extra review
+stage after quality:
+
+```bash
+node install.mjs --target claude --adopt frontend-dev=implementer:frontend
+node install.mjs --target claude --adopt security-auditor=reviewer:security
+```
+
+Each `--adopt <agent>=<role>[:<name>]` writes a generated copy, `loop-implementer-frontend` or
+`loop-reviewer-security`, next to your agent, which stays as it is. The copy is the role's rules
+from the skill (worktree, commits, report, verdict format) followed by your agent's text, with its
+model and tools; where the two disagree, the loop's rules win. Your agent stays the source: edit
+it, run the installer again, and the copy follows (`--check` warns when it is out of date). The
+planner sees the specialists and assigns them in the plan; the planner itself and the spec,
+quality and final reviews stay the bundled agents. To drop a specialist, delete its file.
+
+The `loop-engineering-setup` skill does the same and first reads the agent for instructions that
+fight the loop (pushing, asking the user for confirmation, its own worktree isolation).
+
+Other options: `--project <dir>` copies only the agents, specialists included, into a project (`<dir>/.cursor/agents` or
 `<dir>/.claude/agents`; the Cursor CLI loads subagents only from its workspace), `--force` replaces
 agents you edited (keeping their model) and deletes those of older versions, `--with-permissions`
 adds `permissions.ask` in Claude Code for `git push`, `npm publish`, `git reset --hard`, `git
-branch -D` and `git clean -f`, `--uninstall` removes the hooks, their entries and the unedited
-agents. The installer touches only its own hook entries and backs the hook file up first. Requires
+branch -D` and `git clean -f`, `--uninstall` removes the hooks, their entries, the unedited
+agents and the adopted copies. The installer touches only its own hook entries and backs the hook file up first. Requires
 `node` and `git`.
 
 ### Waves without a task tracker
@@ -71,7 +94,8 @@ The plan is one Markdown file. Its packages sit in a fenced `json packages` bloc
 [
   { "id": "P1", "title": "Add the parser", "touches": ["src/parser.ts"], "blocked_by": [] },
   { "id": "P2", "title": "Use the parser in the CLI", "touches": ["src/cli.ts"], "blocked_by": ["P1"], "implementer": "senior" },
-  { "id": "P3", "title": "Docs", "touches": ["docs/**"], "priority": "low" }
+  { "id": "P3", "title": "Docs", "touches": ["docs/**"], "priority": "low" },
+  { "id": "P4", "title": "Login form", "touches": ["web/login/**"], "implementer": "frontend", "review": ["security"] }
 ]
 ```
 ````
@@ -82,10 +106,12 @@ node ~/.claude/skills/loop-engineering/plan-waves.mjs plans/my-plan.md --done P1
 ```
 
 ```text
-plans/my-plan.md: 3 packages, 0 done, 3 to run in 2 waves
+plans/my-plan.md: 4 packages, 0 done, 4 to run in 2 waves
 wave 1:
   P1  Add the parser  [loop-implementer]
+  P4  Login form  [loop-implementer-frontend]
   P3  Docs  [loop-implementer, low]
+  review after quality: loop-reviewer-security on P4
 wave 2:
   P2  Use the parser in the CLI  [loop-implementer-senior]
 ```
@@ -93,8 +119,12 @@ wave 2:
 A package waits for its `blocked_by`; two packages whose `touches` overlap (same file, a directory
 and a file in it, matching globs) never share a wave; `priority` orders a wave; a package with
 `fixes` repairs another one and runs before anything else; `"implementer": "senior"` sends a
-package to the senior implementer, and so does the second fix of the same package. `--json` gives
-the same result to a program, `--strict` refuses packages without `touches`.
+package to the senior implementer, and so does the second fix of the same package;
+`"implementer": "<name>"` sends it to a specialist and `"review": ["<name>"]` adds a specialist's
+review stage, which the package's fixes inherit. `--agents <types|none>` says which specialists
+the harness has: a missing one becomes a `fallback:` line (the standard implementer runs the
+package, the stage is skipped). `--json` gives the same result to a program, `--strict` refuses
+packages without `touches`.
 
 ### The implementers' fast check
 

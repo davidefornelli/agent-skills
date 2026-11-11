@@ -15,7 +15,10 @@ const LOG_DIR = join(CONFIG_DIR, "hooks", "logs");
 const flag = process.argv.indexOf("--harness");
 const REGISTERED = flag === -1 ? null : process.argv[flag + 1];
 
-export const IMPLEMENTER = /^loop-implementer(-senior)?$/;
+// The loop's agent types: the planner, the two bundled implementers, the reviewer, and the
+// specialists the user adopted (`loop-implementer-<name>`, `loop-reviewer-<name>`).
+export const IMPLEMENTER = /^loop-implementer(-[a-z0-9][a-z0-9-]*)?$/;
+export const ROLE = /^loop-(planner|(implementer|reviewer)(-[a-z0-9][a-z0-9-]*)?)$/;
 
 /** One JSON line in <config>/hooks/logs/<file>. Logging never breaks a hook. */
 export function log(file, entry) {
