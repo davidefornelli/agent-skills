@@ -1,77 +1,84 @@
 #!/usr/bin/env node
-// PreToolUse hook on the Agent tool: refuses to launch a loop implementer without its
-// `WORKTREE: <absolute path>` and `BASE: <ref>` lines (the SubagentStop check reads them) or any
-// loop agent with a `model` override that contradicts the role's pinned model. Other agent types
-// pass untouched. Every decision is logged. Fails open: a problem of the hook itself prints
-// nothing and the launch goes on.
-//
-// Ported from an equivalent Cursor hook. Claude Code's SubagentStart cannot block a start,
-// so the guard runs before the Agent tool call instead.
-import { appendFileSync, mkdirSync, readFileSync } from "node:fs";
+// Guard on the launch of a loop subagent: Claude Code runs it as PreToolUse on the Agent tool
+// (its SubagentStart cannot refuse a start), Cursor as subagentStart. It refuses:
+// - an implementer without its `WORKTREE: <absolute path>` and `BASE: <ref>` lines (the check
+//   after it reads them);
+// - a loop agent launched on a model other than the one its agent file sets (`model:` in the
+//   front matter; `inherit` or no line leaves the model free).
+// Other agent types pass untouched. Every decision is logged. Fails open: a problem of the hook
+// itself lets the launch go on.
+import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+import { CONFIG_DIR, IMPLEMENTER, frontmatter, log, pass, reply, start } from "./common.mjs";
 
-const CONFIG_DIR = process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), ".claude");
-const LOG_FILE = join(CONFIG_DIR, "hooks", "logs", "subagents.jsonl");
+const LOG = "subagents.jsonl";
+const ROLE = /^loop-(planner|reviewer|implementer(-senior)?)$/;
 
-/** subagent type → the model family it must run on, and whether it needs a WORKTREE line. */
-const POLICY = {
-  "loop-implementer-sonnet": { model: /sonnet/i, label: "Sonnet", worktree: true },
-  "loop-implementer-opus": { model: /opus/i, label: "Opus", worktree: true },
-  "loop-reviewer": { model: /opus/i, label: "Opus" },
-  "loop-planner": { model: /opus/i, label: "Opus" },
-};
+const { input, harness } = start(LOG);
 
-function log(entry) {
-  try {
-    mkdirSync(dirname(LOG_FILE), { recursive: true });
-    appendFileSync(LOG_FILE, JSON.stringify({ at: new Date().toISOString(), ...entry }) + "\n");
-  } catch {
-    // logging must never break the hook
-  }
+const allow = () => reply(harness === "cursor" ? { permission: "allow" } : {});
+function deny(reason) {
+  if (harness === "cursor") reply({ permission: "deny", user_message: reason, agent_message: reason });
+  reply({ hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: reason } });
 }
 
-let input;
+/** The agent file the harness will load for this type: the project's before the user's. */
+function agentFile(type) {
+  const dirs = [];
+  if (harness === "cursor") {
+    for (const root of input.workspace_roots ?? []) for (const d of [".cursor", ".claude", ".codex"]) dirs.push(join(root, d, "agents"));
+    dirs.push(join(CONFIG_DIR, "agents"), join(homedir(), ".claude", "agents"), join(homedir(), ".codex", "agents"));
+  } else {
+    for (let d = input.cwd; typeof d === "string" && d !== ""; d = dirname(d)) {
+      dirs.push(join(d, ".claude", "agents"));
+      if (dirname(d) === d) break;
+    }
+    dirs.push(join(CONFIG_DIR, "agents"));
+  }
+  return dirs.map((d) => join(d, `${type}.md`)).find((f) => existsSync(f));
+}
+
+// `opus` and `claude-opus-5-5`, `grok-4.7-xhigh` and `grok-4.7-xhigh-fast[context=1m]` name the
+// same choice: a model contradicts the file only when neither name contains the other.
+const bare = (model) => String(model).toLowerCase().replace(/\[.*$/, "").trim();
+const sameModel = (a, b) => bare(a).includes(bare(b)) || bare(b).includes(bare(a));
+
 try {
-  input = JSON.parse(readFileSync(0, "utf8").replace(/^﻿/, "") || "{}");
+  const launch =
+    harness === "cursor"
+      ? { type: input.subagent_type, model: input.subagent_model, prompt: input.task, session: input.parent_conversation_id ?? input.conversation_id }
+      : { type: input.tool_input?.subagent_type, model: input.tool_input?.model, prompt: input.tool_input?.prompt, session: input.session_id };
+  const type = String(launch.type ?? "");
+  if (!ROLE.test(type)) allow();
+
+  const problems = [];
+  const file = agentFile(type);
+  const pinned = file ? frontmatter(file).model : undefined;
+  if (typeof launch.model === "string" && launch.model !== "" && pinned && pinned !== "inherit" && !sameModel(launch.model, pinned)) {
+    problems.push(
+      `${type} runs on "${pinned}" (the model line of ${file}), not on "${launch.model}": launch it without a model. ` +
+        "To change the model of a role, edit that line or run the skill's install.mjs with --model.",
+    );
+  }
+  if (IMPLEMENTER.test(type)) {
+    const prompt = String(launch.prompt ?? "");
+    if (!/^\s*WORKTREE:\s*(\/|[A-Za-z]:[\\/])/m.test(prompt)) {
+      problems.push(`${type} needs a line "WORKTREE: <absolute path of its git worktree>" in its prompt.`);
+    }
+    if (!/^\s*BASE:\s*\S/m.test(prompt)) {
+      problems.push(`${type} needs a line "BASE: <commit its branch started from>" in its prompt: the check after it covers the changes since BASE.`);
+    }
+  }
+
+  const entry = { event: "guard", harness, type, model: launch.model, pinned, session: launch.session };
+  if (problems.length > 0) {
+    log(LOG, { ...entry, decision: "deny", problems });
+    deny(problems.join("\n"));
+  }
+  log(LOG, { ...entry, decision: "allow" });
+  allow();
 } catch (e) {
-  log({ event: "guard", error: `bad input: ${e}` });
-  process.exit(0);
+  log(LOG, { event: "guard", error: String(e) });
+  pass();
 }
-
-const tool = input.tool_input ?? {};
-const type = tool.subagent_type;
-const policy = POLICY[type];
-const base = { event: "guard", type, model: tool.model, description: tool.description, session: input.session_id };
-
-if (!policy) process.exit(0);
-
-const problems = [];
-if (typeof tool.model === "string" && tool.model !== "" && !policy.model.test(tool.model)) {
-  problems.push(`${type} must run on ${policy.label}; do not pass model "${tool.model}" (the agent's frontmatter pins it).`);
-}
-if (policy.worktree) {
-  const prompt = tool.prompt ?? "";
-  if (!/^\s*WORKTREE:\s*(\/|[A-Za-z]:[\\/])/m.test(prompt)) {
-    problems.push(`${type} needs a line "WORKTREE: <absolute path of its git worktree>" in its prompt.`);
-  }
-  if (!/^\s*BASE:\s*\S/m.test(prompt)) {
-    problems.push(`${type} needs a line "BASE: <commit its branch started from>" in its prompt: the check after it covers the changes since BASE.`);
-  }
-}
-
-if (problems.length > 0) {
-  log({ ...base, decision: "deny", problems });
-  process.stdout.write(
-    JSON.stringify({
-      hookSpecificOutput: {
-        hookEventName: "PreToolUse",
-        permissionDecision: "deny",
-        permissionDecisionReason: problems.join("\n"),
-      },
-    }),
-  );
-  process.exit(0);
-}
-log({ ...base, decision: "allow" });
-process.exit(0);

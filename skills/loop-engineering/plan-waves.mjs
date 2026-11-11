@@ -7,15 +7,16 @@
 //   [
 //     { "id": "P1", "title": "Add the parser", "touches": ["src/parser.ts"], "blocked_by": [] },
 //     { "id": "P2", "title": "Use the parser", "touches": ["src/cli.ts"], "blocked_by": ["P1"],
-//       "implementer": "opus", "priority": "high" },
+//       "implementer": "senior", "priority": "high" },
 //     { "id": "P3", "title": "Fix R1-2", "touches": ["src/parser.ts"], "fixes": "P1" }
 //   ]
 //   ```
 //
 // Fields: id and title (required); blocked_by (ids that must be done first); touches (the files
 // the package owns: paths relative to the repository, a directory, or a glob); implementer
-// (`sonnet`, the default, or `opus`); priority (`urgent`, `high`, `medium`, `low`); fixes (the id
-// of the package this one repairs).
+// (`standard`, the default, or `senior`: which of the two implementer agents runs it; the model of
+// each agent is set where the agents are installed); priority (`urgent`, `high`, `medium`, `low`);
+// fixes (the id of the package this one repairs).
 //
 // Rules:
 // - a wave holds packages that can run in parallel; a package waits for its blocked_by;
@@ -24,7 +25,7 @@
 // - inside a wave: priority first (urgent, high, medium, low; none counts as medium), then id;
 // - whatever waits for a package also waits for the packages that fix it, and while fix packages
 //   are ready the wave holds only them;
-// - the second fix of the same package runs on the opus implementer (`escalated`).
+// - the second fix of the same package runs on the senior implementer (`escalated`).
 //
 // Usage: node plan-waves.mjs <plan.md> [--done P1,P2] [--json] [--strict]
 //   --done    packages already merged into the integration branch: they are left out and count
@@ -35,7 +36,9 @@
 import { readFileSync } from "node:fs";
 
 const PRIORITIES = ["urgent", "high", "medium", "low"];
-const IMPLEMENTERS = ["sonnet", "opus"];
+const IMPLEMENTERS = ["standard", "senior"];
+// Plans written before the implementers were named after their role, not their model.
+const OLD_IMPLEMENTERS = { sonnet: "standard", opus: "senior" };
 const FIELDS = new Set(["id", "title", "blocked_by", "touches", "implementer", "priority", "fixes"]);
 
 function usage(message) {
@@ -125,7 +128,12 @@ readPackages().forEach((raw, index) => {
   for (const key of ["blocked_by", "touches"]) {
     if (raw[key] !== undefined && !strings(raw[key])) errors.push(`${id}: "${key}" must be an array of non-empty strings`);
   }
-  if (raw.implementer !== undefined && !IMPLEMENTERS.includes(raw.implementer)) {
+  let implementer = raw.implementer;
+  if (Object.hasOwn(OLD_IMPLEMENTERS, implementer)) {
+    warnings.push(`${id}: "implementer": "${implementer}" is the old name of "${OLD_IMPLEMENTERS[implementer]}": write that`);
+    implementer = OLD_IMPLEMENTERS[implementer];
+  }
+  if (implementer !== undefined && !IMPLEMENTERS.includes(implementer)) {
     errors.push(`${id}: "implementer" must be ${IMPLEMENTERS.join(" or ")}`);
   }
   if (raw.priority !== undefined && !PRIORITIES.includes(raw.priority)) {
@@ -139,7 +147,7 @@ readPackages().forEach((raw, index) => {
     title: typeof raw.title === "string" ? raw.title.trim() : "",
     blocked_by: strings(raw.blocked_by) ? [...new Set(raw.blocked_by.map((s) => s.trim()))] : [],
     touches: strings(raw.touches) ? [...new Set(raw.touches.map(normalize))] : [],
-    implementer: IMPLEMENTERS.includes(raw.implementer) ? raw.implementer : "sonnet",
+    implementer: IMPLEMENTERS.includes(implementer) ? implementer : "standard",
     priority: PRIORITIES.includes(raw.priority) ? raw.priority : null,
     fixes: typeof raw.fixes === "string" && raw.fixes.trim() !== "" ? raw.fixes.trim() : null,
     index,
@@ -196,7 +204,7 @@ for (const p of packages) {
   // The second fix of the same package goes to the stronger implementer.
   const origin = p.repairs.at(-1);
   p.escalated = origin !== undefined && fixersOf.get(origin).some((f) => f.id !== p.id && done.has(f.id));
-  if (p.escalated) p.implementer = "opus";
+  if (p.escalated) p.implementer = "senior";
 }
 
 // ---------------------------------------------------------------- overlap of touches
@@ -341,7 +349,7 @@ if (strict && unknownScope.length > 0) {
 }
 
 // ---------------------------------------------------------------- output
-const agentOf = (p) => `loop-implementer-${p.implementer}`;
+const agentOf = (p) => (p.implementer === "senior" ? "loop-implementer-senior" : "loop-implementer");
 const result = {
   plan: planPath,
   packages: packages.length,

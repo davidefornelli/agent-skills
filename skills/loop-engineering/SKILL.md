@@ -1,14 +1,14 @@
 ---
 name: loop-engineering
-description: Claude Code only. Runs a plan through a closed loop of subagents until a reviewer passes it - a planner splits the work into packages and waves, implementers work in parallel in their own git worktrees, a reviewer verifies in two stages, the planner revises the plan from the verdict, and the fixes run again. Use when the user asks to execute a plan "in loop", with loop engineering, or with planner, implementers and reviewer. Not for small changes.
+description: Runs a plan through a closed loop of subagents until a reviewer passes it - a planner splits the work into packages and waves, implementers work in parallel in their own git worktrees, a reviewer verifies in two stages, the planner revises the plan from the verdict, and the fixes run again. For Claude Code and Cursor. Use when the user asks to execute a plan "in loop", with loop engineering, or with planner, implementers and reviewer. Not for small changes.
 ---
 
-# Loop engineering (Claude Code)
+# Loop engineering
 
 The main session is the **orchestrator**: it launches the subagents, merges their branches, runs
 the full verification once per wave and keeps the loop's state. Implementing and judging belong to
-the subagents. The loop is tuned for an orchestrator on Opus, effort high: on a smaller model, tell
-the user once and go on.
+the subagents. The orchestrator needs a strong model at high effort: on a smaller one, tell the
+user once and go on.
 
 ## When not to use it
 
@@ -19,30 +19,37 @@ A loop costs 3 to 5 times a direct implementation. Do the work directly, and say
 
 ## Roles
 
-| Role | Subagent type | Model (pinned in its frontmatter) | Writes |
-| --- | --- | --- | --- |
-| Orchestrator | the main session | Opus, effort high | the loop state, merges |
-| Planner | `loop-planner` | Opus, effort high | the plan file |
-| Implementer | `loop-implementer-sonnet`; `loop-implementer-opus` where the wave calculator says so | Sonnet / Opus, effort medium | its worktree and branch |
-| Reviewer | `loop-reviewer` | Opus, effort high | the verdict file |
+| Role | Subagent type | Writes |
+| --- | --- | --- |
+| Orchestrator | the main session | the loop state, merges |
+| Planner | `loop-planner` | the plan file |
+| Implementer | `loop-implementer`; `loop-implementer-senior` where the wave calculator says so | its worktree and branch |
+| Reviewer | `loop-reviewer` | the verdict file |
 
-Launch these types without a `model` argument. Each agent's own file holds its role's rules: your
-prompts carry the inputs listed below.
+Each role's model is the `model:` line of its agent file: launch these types without a model
+argument. Each agent's own file holds its role's rules: your prompts carry the inputs listed below.
 
-## Setup (once per machine)
+## Your harness
 
-When `~/.claude/agents/loop-planner.md` is missing, tell the user and, with their ok, run:
+The loop is the same in Claude Code and Cursor. Where the steps below say *launch*, *resume*,
+*session id* or `<config>`, use your harness's column:
 
-```bash
-node <this skill's folder>/install.mjs    # --dry-run previews, --force overwrites changed agents,
-                                          # --with-permissions, --uninstall
-```
+| | Claude Code | Cursor |
+| --- | --- | --- |
+| Launch a subagent | `Agent` tool, `subagent_type` | `Task` tool, `subagent_type` |
+| In the background | `run_in_background: true` | `run_in_background: true` |
+| Resume the same agent | `SendMessage` to its agent id | `Task` with `resume` = its agent id |
+| Session id | `$CLAUDE_CODE_SESSION_ID` | `$CURSOR_CONVERSATION_ID` |
+| `<config>` | `~/.claude` | `~/.cursor` |
+| Harness name in the lock | `claude-code` | `cursor` |
 
-It copies the four agents to `~/.claude/agents` and three hooks to
-`~/.claude/hooks/loop-engineering`, and registers the hooks in `~/.claude/settings.json` (backup:
-`settings.json.bak-loop-engineering`). `--with-permissions` also adds `permissions.ask` for
-`git push`, `npm publish`, `git reset --hard`, `git branch -D` and `git clean -f`. Claude Code must
-be restarted afterwards. Requires `node` and `git`.
+## Setup (once per machine and harness)
+
+Before the first launch of a session, run `node <this skill's folder>/install.mjs --check`. Exit 0:
+go on. Otherwise show the user its output and set the machine up with the `loop-engineering-setup`
+skill (without it: the repair command the check prints, with the user's ok), then ask the user to
+restart the harness. When your subagent tool does not offer the `loop-*` types after that, release
+the lock and stop: the roles run on these agents only.
 
 ## Files
 
@@ -50,7 +57,7 @@ be restarted afterwards. Requires `node` and `git`.
   is the source of the waves.
 - **State**: `<plan>.loop/state.md`. Create it at the start, update it after every step, read it
   first when you resume. It holds:
-  - the lock: `Orchestrator: session <id>, since <time>, updated <time>`;
+  - the lock: `Orchestrator: <harness name>, session <id>, since <time>, updated <time>`;
   - the plan's Execution setup as you use it (integration branch and worktree, start commit);
   - the round counter and, per wave, the rounds used and the limit;
   - per package: status (`todo`, `running`, `merged`, `passed`, `failed`), branch, worktree, base,
@@ -67,12 +74,13 @@ With a Datanotes MCP server connected (tools `plan_execution`, `start_task`), al
 
 ## One orchestrator at a time
 
-Before launching anything, read the state file of the plan, and look for one written by another
-tool for the same plan (e.g. Cursor's `~/.cursor/plans/*.loop/state.md`). A lock of another session
-or a package `running`: ask the user, giving the lock's `updated` age. Two orchestrators on the
-same worktrees destroy each other's work. When you take a loop over, run `git worktree list` and
-`git status` in each package worktree first, and report uncommitted work before touching it. When
-you stop, set the lock to `released` and running packages to `todo`.
+A Claude Code session and a Cursor session can hand a loop over to each other through the state
+file. Before launching anything, read the state file of the plan, and look for another one of the
+same plan (`~/.claude/plans/*.loop/state.md`, `~/.cursor/plans/*.loop/state.md`). A lock of another
+session or a package `running`: ask the user, giving the lock's `updated` age. Two orchestrators on
+the same worktrees destroy each other's work. When you take a loop over, run `git worktree list`
+and `git status` in each package worktree first, and report uncommitted work before touching it.
+When you stop, set the lock to `released` and running packages to `todo`.
 
 ## The loop
 
@@ -91,8 +99,8 @@ you stop, set the lock to `released` and running packages to `todo`.
    project asks for, else `none`) and, for a fix or a rerun, the findings to close with their ids.
 4. **Read each status line.**
    - `DONE`: go on. `DONE_WITH_CONCERNS`: the concerns go into the reviewer's prompt.
-   - `NEEDS_CONTEXT`: answer from the plan or the code and resume the same agent (`SendMessage`);
-     ask the user what only they can answer.
+   - `NEEDS_CONTEXT`: answer from the plan or the code and resume the same agent; ask the user
+     what only they can answer.
    - `BLOCKED`: the package is `failed`; record your own finding (below) quoting the report.
 5. **Integrate.** In the integration worktree, merge the wave's branches in the calculator's order
    (`git merge --no-ff <branch>`), marking each package `merged`. On a conflict: `git merge
@@ -134,16 +142,16 @@ you stop, set the lock to `released` and running packages to `todo`.
   A check you cannot get green goes back through the loop.
 - One implementer per package; a merge conflict between two packages of a wave is a `plan` finding.
 - Keep your own context small: read reports and verdicts, leave the diffs to the reviewer.
-- The hooks back this up:
-  - `agent-guard` (PreToolUse on Agent) refuses an implementer without `WORKTREE:` and `BASE:`, or
-    a loop agent with a `model` that contradicts its role. Fix the cause it names and launch the
-    same type again.
-  - `subagent-verify` (SubagentStop on the implementers) runs the fast check on the changes since
-    BASE (the `VERIFY:` lines, else `<worktree>/.claude/verify-fast`, else type check and `vitest
-    related`) and sends the implementer back to fix a failure, at most twice. Log:
-    `~/.claude/hooks/logs/subagent-verify.jsonl`.
-  - `subagent-audit` (SubagentStop) writes one line per subagent to
-    `~/.claude/hooks/logs/subagents.jsonl` (type, model, seconds, tool calls, `session`).
+- The hooks back this up (logs in `<config>/hooks/logs/`):
+  - `agent-guard`, at the launch of a loop agent, refuses an implementer without `WORKTREE:` and
+    `BASE:`, and a model argument that contradicts the agent file. Fix the cause it names and
+    launch the same type again.
+  - `subagent-verify`, when an implementer stops, runs the fast check on the changes since BASE
+    (the `VERIFY:` lines, else `<worktree>/.claude/verify-fast` or `.cursor/verify-fast`, else type
+    check and `vitest related`) and sends the implementer back to fix a failure, at most twice.
+    Log: `subagent-verify.jsonl`.
+  - `subagent-audit` writes one line per finished subagent to `subagents.jsonl` (harness, type,
+    model, seconds, tool calls, `session`).
 
 ## Final report to the user
 

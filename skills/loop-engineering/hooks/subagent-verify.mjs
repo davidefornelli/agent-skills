@@ -1,16 +1,15 @@
 #!/usr/bin/env node
-// SubagentStop hook for the loop implementers (registered in settings.json with a matcher on
-// their agent types): runs a fast check in the implementer's worktree and, when it fails, keeps the implementer going
-// with the failure as its next instruction ({"decision":"block","reason":...}). At most
-// MAX_FOLLOWUPS times per subagent, then it lets it stop and logs it. Fails open: any problem of
-// the hook itself lets the subagent stop.
+// SubagentStop hook (Claude Code) / subagentStop hook (Cursor) for the loop implementers: runs a
+// fast check in the implementer's worktree and, when it fails, keeps the implementer going with
+// the failure as its next instruction. At most MAX_FOLLOWUPS times per subagent, then it lets it
+// stop and logs it. Fails open: any problem of the hook itself lets the subagent stop.
 //
-// Ported from an equivalent Cursor hook, with one change: the check covers the changes since
-// the package's base ref (committed and not), not only the uncommitted ones, because implementers
-// commit before they stop.
+// The check covers the changes since the package's base ref (committed and not), because
+// implementers commit before they stop.
 //
 // The worktree and base come from the `WORKTREE: <absolute path>` and `BASE: <ref>` lines of the
-// subagent's prompt (its first message in the transcript; Claude Code does not pass the prompt).
+// subagent's prompt. Cursor passes the prompt (`task`); Claude Code does not, so it is read from
+// the subagent's transcript (its first message).
 // The check, first match wins:
 // 1. the `VERIFY: <command>` lines of the prompt, one command per line (the plan's fast check);
 // 2. the commands in `<worktree>/.claude/verify-fast` or `<worktree>/.cursor/verify-fast`
@@ -18,16 +17,16 @@
 // 3. the project's type check (`npm run typecheck`, or `npx tsc --noEmit` with a tsconfig.json)
 //    and `npx vitest related --run <changed files>` (with vitest), on the files changed since
 //    BASE (default: the merge-base with main or master).
-// All the commands together get BUDGET_MS, less than the hook's timeout in settings.json (900 s):
-// a check that runs out of time is logged and the subagent stops.
-// The subagent's report starting with `STATUS: BLOCKED` or `STATUS: NEEDS_CONTEXT` is not checked.
+// All the commands together get BUDGET_MS, less than the hook's registered timeout (900 s): a
+// check that runs out of time is logged and the subagent stops.
+// A report starting with `STATUS: BLOCKED` or `STATUS: NEEDS_CONTEXT` is not checked, and neither
+// is a Cursor subagent that ended in error or was aborted.
 import { spawnSync } from "node:child_process";
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { join, resolve } from "node:path";
+import { CONFIG_DIR, IMPLEMENTER, log as logTo, pass as letStop, reply, start } from "./common.mjs";
 
-const CONFIG_DIR = process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), ".claude");
-const LOG_FILE = join(CONFIG_DIR, "hooks", "logs", "subagent-verify.jsonl");
+const LOG = "subagent-verify.jsonl";
 const STATE_DIR = join(CONFIG_DIR, "hooks", "state");
 const MAX_FOLLOWUPS = 2;
 const BUDGET_MS = 14 * 60 * 1000;
@@ -36,22 +35,11 @@ const started = Date.now();
 const TAIL_CHARS = 4000;
 const SLOW_TESTS = ["**/e2e*.test.*", "**/*.e2e.test.*", "**/node_modules/**"];
 
-function log(entry) {
-  try {
-    mkdirSync(dirname(LOG_FILE), { recursive: true });
-    appendFileSync(LOG_FILE, JSON.stringify({ at: new Date().toISOString(), ...entry }) + "\n");
-  } catch {
-    // logging must never break the hook
-  }
-}
-
-function letStop() {
-  process.exit(0);
-}
+const { input, harness } = start(LOG);
+const log = (entry) => logTo(LOG, { harness, ...entry });
 
 function keepGoing(reason) {
-  process.stdout.write(JSON.stringify({ decision: "block", reason }));
-  process.exit(0);
+  reply(harness === "cursor" ? { followup_message: reason } : { decision: "block", reason });
 }
 
 /** The text of the subagent's first user message: the prompt it was launched with. */
@@ -130,7 +118,10 @@ function run(command, cwd, timeout) {
   return { ok: r.status === 0, exit: r.status ?? (r.error ? String(r.error.code ?? r.error.message) : "killed"), tail: output.slice(-TAIL_CHARS) };
 }
 
+// Follow-ups already sent to this subagent. Cursor counts them itself (loop_count); for Claude
+// Code they are kept in a file per subagent.
 function followups(id) {
+  if (harness === "cursor") return Number(input.loop_count ?? 0);
   try {
     return JSON.parse(readFileSync(join(STATE_DIR, `verify-${id}.json`), "utf8")).count ?? 0;
   } catch {
@@ -139,6 +130,7 @@ function followups(id) {
 }
 
 function countFollowup(id, count) {
+  if (harness === "cursor") return;
   try {
     mkdirSync(STATE_DIR, { recursive: true });
     writeFileSync(join(STATE_DIR, `verify-${id}.json`), JSON.stringify({ count }));
@@ -147,22 +139,23 @@ function countFollowup(id, count) {
   }
 }
 
-let input = {};
 try {
-  input = JSON.parse(readFileSync(0, "utf8").replace(/^﻿/, "") || "{}");
-} catch (e) {
-  log({ event: "bad_input", error: String(e) });
-  letStop();
-}
-
-try {
-  const id = input.agent_id ?? "unknown";
-  const status = /^\s*STATUS:\s*(\w+)/m.exec(input.last_assistant_message ?? "")?.[1];
+  const cursor = harness === "cursor";
+  const type = cursor ? input.subagent_type : input.agent_type;
+  const id = (cursor ? (input.subagent_id ?? input.conversation_id) : input.agent_id) ?? "unknown";
+  // The registered matcher already selects the implementers; this covers a harness without it.
+  if (type !== undefined && !IMPLEMENTER.test(String(type))) letStop();
+  if (cursor && input.status !== "completed") {
+    log({ event: "skipped", id, reason: `status ${input.status}` });
+    letStop();
+  }
+  const report = String((cursor ? input.summary : input.last_assistant_message) ?? "");
+  const status = /^\s*STATUS:\s*(\w+)/m.exec(report)?.[1];
   if (status === "BLOCKED" || status === "NEEDS_CONTEXT") {
     log({ event: "skipped", id, reason: `status ${status}` });
     letStop();
   }
-  const prompt = firstPrompt(input.agent_transcript_path);
+  const prompt = cursor ? String(input.task ?? "") : firstPrompt(input.agent_transcript_path);
   const declared = /^\s*WORKTREE:\s*(.+?)\s*$/m.exec(prompt)?.[1];
   const base = /^\s*BASE:\s*(\S+)\s*$/m.exec(prompt)?.[1];
   if (!declared || !existsSync(declared)) {
@@ -181,7 +174,7 @@ try {
     }
     const timeout = Math.min(COMMAND_TIMEOUT_MS, left);
     const result = run(command, root, timeout);
-    log({ event: "check", id, type: input.agent_type, root, command, ok: result.ok, exit: result.exit, followups: done });
+    log({ event: "check", id, type, root, command, ok: result.ok, exit: result.exit, followups: done });
     if (result.ok) continue;
     if (result.exit === "ETIMEDOUT" && timeout < COMMAND_TIMEOUT_MS) {
       // Cut short by the budget, not by its own limit: that says nothing about the package.

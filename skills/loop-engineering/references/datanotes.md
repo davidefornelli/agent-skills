@@ -11,8 +11,10 @@ file stays the source: its `json packages` block decides the waves, as in the sk
    and `blocked_by` copied from the `json packages` block, body = objective and acceptance criteria.
 3. Run `plan_execution` on the plan task and compare its waves with `plan-waves.mjs`. They read the
    same data: a difference means the sub-tasks drifted from the block. Correct the sub-tasks.
-4. Open the orchestrator's run with `start_task` on the plan task (`agent_session` =
-   `$CLAUDE_CODE_SESSION_ID`), after binding the session to it when a `bind-task` skill exists.
+4. Open the orchestrator's run with `start_task` on the plan task (`harness` = yours,
+   `agent_session` = your session id: `$CLAUDE_CODE_SESSION_ID` in Claude Code,
+   `$CURSOR_CONVERSATION_ID` in Cursor), after binding the session to it (`bind_session`, or a
+   `bind-task` skill when one exists).
 5. Each implementer prompt also carries `TASK: <sub-task path>` and the instruction to call
    `start_task` on it at the start (declaring `model` and `harness`, `parent_run` = the
    orchestrator's run) and `end_run` at the end (outcome, branch, one-line summary). When an
@@ -20,3 +22,6 @@ file stays the source: its `json packages` block decides the waves, as in the sk
 6. When a wave passes: `complete_task` on its packages' sub-tasks. The planner's fix packages
    become new sub-tasks (same fields, `blocked_by` as in the block). When every package has passed:
    `complete_task` on the plan task and `end_run`.
+
+A write Datanotes refuses to your session's token is noted in the state file and in the final
+report; the loop goes on.
