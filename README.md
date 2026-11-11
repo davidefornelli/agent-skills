@@ -73,6 +73,15 @@ it, run the installer again, and the copy follows (`--check` warns when it is ou
 planner sees the specialists and assigns them in the plan; the planner itself and the spec,
 quality and final reviews stay the bundled agents. To drop a specialist, delete its file.
 
+Before anything is launched, the loop shows you the waves with each package's implementer and the
+extra review stages, and waits for your ok. A plan that names a specialist the harness does not
+have still runs: the standard implementer takes the package, or the review stage is skipped. The
+loop says so with a `fallback:` line, both when it asks for your ok and in its final report.
+
+To compare a specialist with the bundled agents, read the final report: it gives the time and the
+tool calls per agent type. The numbers come from `hooks/logs/subagents.jsonl` in `~/.claude` or
+`~/.cursor`, one line per finished subagent (type, model, seconds, tool calls).
+
 The `loop-engineering-setup` skill does the same and first reads the agent for instructions that
 fight the loop (pushing, asking the user for confirmation, its own worktree isolation).
 
