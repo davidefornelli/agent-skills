@@ -9,7 +9,8 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
-const LOG_FILE = join(homedir(), ".claude", "hooks", "logs", "subagents.jsonl");
+const CONFIG_DIR = process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), ".claude");
+const LOG_FILE = join(CONFIG_DIR, "hooks", "logs", "subagents.jsonl");
 
 /** Start, end, model and tool calls of a subagent, from its JSONL transcript. */
 function fromTranscript(path) {

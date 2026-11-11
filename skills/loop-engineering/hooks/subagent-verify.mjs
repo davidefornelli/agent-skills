@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-// SubagentStop hook for the loop implementers (declared in their frontmatter as a Stop hook):
-// runs a fast check in the implementer's worktree and, when it fails, keeps the implementer going
+// SubagentStop hook for the loop implementers (registered in settings.json with a matcher on
+// their agent types): runs a fast check in the implementer's worktree and, when it fails, keeps the implementer going
 // with the failure as its next instruction ({"decision":"block","reason":...}). At most
 // MAX_FOLLOWUPS times per subagent, then it lets it stop and logs it. Fails open: any problem of
 // the hook itself lets the subagent stop.
@@ -12,20 +12,27 @@
 // The worktree and base come from the `WORKTREE: <absolute path>` and `BASE: <ref>` lines of the
 // subagent's prompt (its first message in the transcript; Claude Code does not pass the prompt).
 // The check, first match wins:
-// 1. the commands in `<worktree>/.claude/verify-fast` or `<worktree>/.cursor/verify-fast`
+// 1. the `VERIFY: <command>` lines of the prompt, one command per line (the plan's fast check);
+// 2. the commands in `<worktree>/.claude/verify-fast` or `<worktree>/.cursor/verify-fast`
 //    (one per line, `#` comments);
-// 2. `npx tsc --noEmit` (with a tsconfig.json) and `npx vitest related --run <changed files>`
-//    (with vitest), on the files changed since BASE (default: the merge-base with main).
+// 3. the project's type check (`npm run typecheck`, or `npx tsc --noEmit` with a tsconfig.json)
+//    and `npx vitest related --run <changed files>` (with vitest), on the files changed since
+//    BASE (default: the merge-base with main or master).
+// All the commands together get BUDGET_MS, less than the hook's timeout in settings.json (900 s):
+// a check that runs out of time is logged and the subagent stops.
 // The subagent's report starting with `STATUS: BLOCKED` or `STATUS: NEEDS_CONTEXT` is not checked.
 import { spawnSync } from "node:child_process";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 
-const LOG_FILE = join(homedir(), ".claude", "hooks", "logs", "subagent-verify.jsonl");
-const STATE_DIR = join(homedir(), ".claude", "hooks", "state");
+const CONFIG_DIR = process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), ".claude");
+const LOG_FILE = join(CONFIG_DIR, "hooks", "logs", "subagent-verify.jsonl");
+const STATE_DIR = join(CONFIG_DIR, "hooks", "state");
 const MAX_FOLLOWUPS = 2;
+const BUDGET_MS = 14 * 60 * 1000;
 const COMMAND_TIMEOUT_MS = 8 * 60 * 1000;
+const started = Date.now();
 const TAIL_CHARS = 4000;
 const SLOW_TESTS = ["**/e2e*.test.*", "**/*.e2e.test.*", "**/node_modules/**"];
 
@@ -86,7 +93,7 @@ function declaredChecks(root) {
 
 /** Files changed since base, committed, uncommitted and untracked, that still exist. */
 function changedFiles(root, base) {
-  const ref = base ?? git(["merge-base", "HEAD", "main"], root) ?? "HEAD";
+  const ref = base ?? git(["merge-base", "HEAD", "main"], root) ?? git(["merge-base", "HEAD", "master"], root) ?? "HEAD";
   const lists = [
     git(["diff", "--name-only", `${ref}...HEAD`], root),
     git(["diff", "--name-only", "HEAD"], root),
@@ -96,7 +103,9 @@ function changedFiles(root, base) {
   return [...files].map((f) => join(root, f)).filter((f) => existsSync(f));
 }
 
-function checksFor(root, base) {
+function checksFor(root, base, prompt) {
+  const fromPlan = [...prompt.matchAll(/^[ \t]*VERIFY:[ \t]*(\S.*?)[ \t]*$/gm)].map((m) => m[1]);
+  if (fromPlan.length > 0) return fromPlan;
   const declared = declaredChecks(root);
   if (declared) return declared;
   if (!existsSync(join(root, "package.json"))) return [];
@@ -115,8 +124,8 @@ function checksFor(root, base) {
   return checks;
 }
 
-function run(command, cwd) {
-  const r = spawnSync(command, { cwd, shell: true, encoding: "utf8", timeout: COMMAND_TIMEOUT_MS, maxBuffer: 64 * 1024 * 1024 });
+function run(command, cwd, timeout) {
+  const r = spawnSync(command, { cwd, shell: true, encoding: "utf8", timeout, maxBuffer: 64 * 1024 * 1024 });
   const output = `${r.stdout ?? ""}${r.stderr ?? ""}`;
   return { ok: r.status === 0, exit: r.status ?? (r.error ? String(r.error.code ?? r.error.message) : "killed"), tail: output.slice(-TAIL_CHARS) };
 }
@@ -162,12 +171,23 @@ try {
   }
   const root = git(["rev-parse", "--show-toplevel"], declared) ?? resolve(declared);
   const done = followups(id);
-  const checks = checksFor(root, base);
+  const checks = checksFor(root, base, prompt);
   if (checks.length === 0) log({ event: "skipped", id, reason: "no check declared or detected", root });
   for (const command of checks) {
-    const result = run(command, root);
+    const left = BUDGET_MS - (Date.now() - started);
+    if (left < 10_000) {
+      log({ event: "out_of_time", id, root, command });
+      letStop();
+    }
+    const timeout = Math.min(COMMAND_TIMEOUT_MS, left);
+    const result = run(command, root, timeout);
     log({ event: "check", id, type: input.agent_type, root, command, ok: result.ok, exit: result.exit, followups: done });
     if (result.ok) continue;
+    if (result.exit === "ETIMEDOUT" && timeout < COMMAND_TIMEOUT_MS) {
+      // Cut short by the budget, not by its own limit: that says nothing about the package.
+      log({ event: "out_of_time", id, root, command, timeout_ms: timeout });
+      letStop();
+    }
     if (done >= MAX_FOLLOWUPS) {
       log({ event: "gave_up", id, root, command });
       letStop();

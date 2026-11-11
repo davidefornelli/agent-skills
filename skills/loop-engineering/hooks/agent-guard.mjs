@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 // PreToolUse hook on the Agent tool: refuses to launch a loop implementer without its
-// `WORKTREE: <absolute path>` line (the SubagentStop check reads it) or with a `model` override
-// that contradicts the role's pinned model. Every decision is logged. Fails open: a problem of the
-// hook itself prints nothing and the launch goes on.
+// `WORKTREE: <absolute path>` and `BASE: <ref>` lines (the SubagentStop check reads them) or any
+// loop agent with a `model` override that contradicts the role's pinned model. Other agent types
+// pass untouched. Every decision is logged. Fails open: a problem of the hook itself prints
+// nothing and the launch goes on.
 //
 // Ported from an equivalent Cursor hook. Claude Code's SubagentStart cannot block a start,
 // so the guard runs before the Agent tool call instead.
@@ -10,15 +11,15 @@ import { appendFileSync, mkdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
-const LOG_FILE = join(homedir(), ".claude", "hooks", "logs", "subagents.jsonl");
+const CONFIG_DIR = process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), ".claude");
+const LOG_FILE = join(CONFIG_DIR, "hooks", "logs", "subagents.jsonl");
 
 /** subagent type → the model family it must run on, and whether it needs a WORKTREE line. */
 const POLICY = {
-  "implementer-sonnet": { model: /sonnet/i, label: "Sonnet", worktree: true },
-  implementer: { model: /opus/i, label: "Opus", worktree: true },
-  "opus-implementer": { model: /opus/i, label: "Opus", worktree: true },
-  reviewer: { model: /opus/i, label: "Opus" },
-  planner: { model: /opus/i, label: "Opus" },
+  "loop-implementer-sonnet": { model: /sonnet/i, label: "Sonnet", worktree: true },
+  "loop-implementer-opus": { model: /opus/i, label: "Opus", worktree: true },
+  "loop-reviewer": { model: /opus/i, label: "Opus" },
+  "loop-planner": { model: /opus/i, label: "Opus" },
 };
 
 function log(entry) {
@@ -49,8 +50,14 @@ const problems = [];
 if (typeof tool.model === "string" && tool.model !== "" && !policy.model.test(tool.model)) {
   problems.push(`${type} must run on ${policy.label}; do not pass model "${tool.model}" (the agent's frontmatter pins it).`);
 }
-if (policy.worktree && !/^\s*WORKTREE:\s*\S/m.test(tool.prompt ?? "")) {
-  problems.push(`${type} needs a line "WORKTREE: <absolute path>" in its prompt (and "BASE: <ref>" for the check after it; the loop-engineering skill adds both).`);
+if (policy.worktree) {
+  const prompt = tool.prompt ?? "";
+  if (!/^\s*WORKTREE:\s*(\/|[A-Za-z]:[\\/])/m.test(prompt)) {
+    problems.push(`${type} needs a line "WORKTREE: <absolute path of its git worktree>" in its prompt.`);
+  }
+  if (!/^\s*BASE:\s*\S/m.test(prompt)) {
+    problems.push(`${type} needs a line "BASE: <commit its branch started from>" in its prompt: the check after it covers the changes since BASE.`);
+  }
 }
 
 if (problems.length > 0) {
