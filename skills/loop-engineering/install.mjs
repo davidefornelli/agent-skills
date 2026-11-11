@@ -224,7 +224,7 @@ function copyHook(harness, name) {
   const fresh = read(join(here, "hooks", name));
   // The hooks live in their own folder: always ours to overwrite.
   if (existsSync(file) && read(file) === fresh) return say(`= ${file}`);
-  write(file, fresh, `+ ${file}`);
+  write(file, fresh, `${existsSync(file) ? "~" : "+"} ${file}`);
 }
 
 /** Claude Code: settings.json, groups of hooks per event. */
